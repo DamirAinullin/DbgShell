@@ -6131,12 +6131,16 @@ namespace MS.Dbg
                 head = head.DbgFollowPointers();
             }
 
-            DbgSymbol sym = head.DbgGetOperativeSymbol();
-            string itemNamePrefix = sym.Name + "_";
+            DbgSymbol headSym = head.DbgGetOperativeSymbol();
+            string itemNamePrefix = headSym.Name + "_";
 
-            ulong headAddr = sym.Address;
+            // Likely always zero?
+            uint flinkOffset = ((DbgUdtTypeInfo) headSym.Type).Members[ "Flink" ].Offset;
+
+            ulong headAddr = headSym.Address;
 
             dynamic curListEntry = head.Flink;
+            DbgPointerTypeInfo listEntryPointerType = curListEntry.DbgGetOperativeSymbol().Type;
 
             int idx = 0;
 
@@ -6145,6 +6149,9 @@ namespace MS.Dbg
                 // If things go badly, this is likely where we find out--curListEntry will
                 // be a DbgValueError, and thus won't have a DbgGetPointer() method. We
                 // can make the error a little nicer.
+                //
+                // TODO: hoist this check; if curListEntry is an error, the comparison
+                // against headAddr will fail first.
                 if( curListEntry is DbgValueError )
                 {
                     throw new DbgProviderException( Util.Sprintf( "LIST_ENTRY enumeration failed: {0}",
@@ -6160,21 +6167,38 @@ namespace MS.Dbg
 
                 ulong curItemAddr = curListEntry.DbgGetPointer() - listEntryOffset;
 
-                dynamic val = Debugger.GetValueForAddressAndType( curItemAddr,
-                                                                  entryType,
-                                                                  itemNamePrefix + idx.ToString(),
-                                                                  false,
-                                                                  false );
-                yield return val;
+                //dynamic val = Debugger.GetValueForAddressAndType( curItemAddr,
+                var pso = Debugger.GetValueForAddressAndType( curItemAddr,
+                                                              entryType,
+                                                              itemNamePrefix + idx.ToString(),
+                                                              false,
+                                                              false );
+
+                //yield return val.BaseObject; // need to output the DbgValue, not the PSObject
+                yield return (DbgValue) pso.BaseObject; // need to output the DbgValue, not the PSObject
 
                 // TODO:
                 // $curListEntry = Invoke-Expression "`$val.$ListEntryMemberName.Flink"
                 //
                 // There's not a simple way to do this in C#...
                 // BUT... I think it can be done by building dynamic callsites.
-                throw new NotImplementedException();
+                // But do I WANT to do it with dynamic callsites?
+                //throw new NotImplementedException();
 
-                //idx++;
+                // Oh fine, I'll just follow the pointers.
+                //ulong flink = ReadMemAs_pointer( curListEntry.DbgGetPointer() + flinkOffset );
+
+                //curListEntry = Debugger.GetValueForAddressAndType( flink,
+
+                // Note that we don't follow the pointer, because we want curListEntry to
+                // be a pointer, so that it can be compared to headAddr.
+                curListEntry = Debugger.GetValueForAddressAndType( curListEntry.DbgGetPointer() + flinkOffset,
+                                                                   listEntryPointerType,
+                                                                   "listEntry_" + idx.ToString(),
+                                                                   skipConversion: false,
+                                                                   skipDerivedTypeDetection: false );
+
+                idx++;
             } // end while( cur != head )
         } // end EnumerateLIST_ENTRY()
 
