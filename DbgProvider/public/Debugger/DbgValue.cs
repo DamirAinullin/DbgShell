@@ -1336,15 +1336,32 @@ namespace MS.Dbg
                     key = Util.Sprintf( "{0}_{1}", staticMember.Name, i );
                 }
                 m_memberNames.Add( key );
+
+                var target = m_udtType.Target;
+
+                DbgSymbol staticMemberSym;
+                string cacheKey = "s|" + staticMember.DataType.Name + "|" + staticMember.Address.ToString( "x" );
+
+                if( target.TryGetFromUserCache( m_udtType.Module.BaseAddress, cacheKey, out var cachedStaticObj ) )
+                {
+                    staticMemberSym = (DbgSymbol) cachedStaticObj;
+                }
+                else
+                {
+                    staticMemberSym = new DbgSimpleSymbol( Symbol.Debugger,
+                                                           staticMember.Name,
+                                                           staticMember.DataType,
+                                                           staticMember.Address,
+                                                           OperativeSymbol );
+
+                    target.AddToUserCache( m_udtType.Module.BaseAddress, cacheKey, staticMemberSym );
+                }
+
                 // TODO: get rid of useless symbol.children? or somehow reconcile with the
                 // fact that we are creating new DbgSimpleSymbol objects here...
                 // maybe an indexer, from datamemberinfobase to symbol?
                 WrappingPSObject.Properties.Add( new PSSymFieldInfo( key,
-                                                                     new DbgSimpleSymbol( Symbol.Debugger,
-                                                                                          staticMember.Name,
-                                                                                          staticMember.DataType,
-                                                                                          staticMember.Address,
-                                                                                          OperativeSymbol ),
+                                                                     staticMemberSym,
                                                                      staticMember ) );
             }
 
@@ -1670,7 +1687,10 @@ namespace MS.Dbg
     } // end class PSDbgMethodInfo
 
 
-    public abstract class DbgPointerValueBase : DbgValue
+    public abstract class DbgPointerValueBase : DbgValue,
+                                                IEquatable< DbgPointerValueBase >,
+                                                IComparable< DbgPointerValueBase >,
+                                                IComparable
     {
         internal DbgPointerValueBase( DbgSymbol symbol )
             : base( symbol )
@@ -1694,6 +1714,33 @@ namespace MS.Dbg
 
             return dnv.DbgGetPointer();
         }
+
+        // TODO: need to convert from int, long as well, for PS cmdline
+        // TODO: base classes also need their own converters, because PS only likes to compare like to like?
+        public static explicit operator DbgPointerValueBase( ulong addr )
+        {
+            var dbg = DbgEngDebugger._GlobalDebugger;
+
+            var mod = dbg.GetNtdllModuleEffective();
+
+            //var ptrType = DbgPointerTypeInfo.GetPointerTypeInfo( dbg, mod, /* DNTYPE_VOID */ 0x80000000 );
+            //var ptrType = DbgPointerTypeInfo.GetNamedTypeInfo( dbg, mod, /* DNTYPE_VOID */ 0x80000000, SymTag.BaseType );
+            var ptrType = DbgPointerTypeInfo.GetFakeVoidStarType( dbg, mod );
+
+            DEBUG_VALUE dv = new DEBUG_VALUE();
+            dv.Type = DEBUG_VALUE_TYPE.INT64;
+            dv.I64 = addr;
+            var reg = new DbgPseudoRegisterInfo( dbg, "fakeyfakereg", dv, 0, 0, UInt32.MaxValue );
+
+            var sym = new DbgSimpleSymbol( dbg,
+                                           "explicit_op_DbgPointerValueBase_" + addr.ToString( "x" ),
+                                           ptrType,
+                                           reg );
+
+            //return new DbgVoidStarValue( sym );
+            return new DbgPointerValue( sym );
+        }
+
 
         // This was supposed to make null checks in PowerShell really easy, by letting you
         // just type "if( $sym.Value.m_pBlah ) ..." (like in C). Unfortunately, PS does
@@ -1800,6 +1847,32 @@ namespace MS.Dbg
         public override int GetHashCode()
         {
             return ((ulong) this).GetHashCode();
+        }
+
+        public int CompareTo( DbgPointerValueBase other )
+        {
+            if( null == other )
+                return Int32.MaxValue;
+
+            return DbgGetPointer().CompareTo( other.DbgGetPointer() );
+        }
+
+        public int CompareTo( ulong other )
+        {
+            return DbgGetPointer().CompareTo( other );
+        }
+
+        int IComparable.CompareTo( object obj )
+        {
+            if( null == obj )
+                return Int32.MaxValue;
+
+            if( obj is ulong asUlong )
+            {
+                return CompareTo( asUlong );
+            }
+
+            return CompareTo( (DbgPointerValueBase) obj );
         }
     } // end class DbgPointerValueBase
 
@@ -1969,6 +2042,8 @@ namespace MS.Dbg
             //
             //    (pThing + 1)  ????                 Thing*    0x18+sizeof(Thing) (DbgPointerValue)
             //
+            // If we really wanted to do this, a possible way to do it would be
+            // to say that the pointer's value is in a [fake] register.
 
             DbgNamedTypeInfo pointeeType = ((DbgPointerTypeInfo) basePointer.OperativeSymbol.Type).PointeeType;
             Util.Assert( 0 != pointeeType.Size );
